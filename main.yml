@@ -1,0 +1,30 @@
+---
+- hosts: all
+  become: yes
+  user: vagrant 
+  gather_facts: no
+  pre_tasks:
+  - name: 'install python'
+    raw: 'apt-get -y install python'
+
+- hosts: teste
+  become: yes 
+  user: vagrant 
+  roles: 
+  - common_setup 
+  tags: common
+
+- hosts: teste
+  become: yes 
+  user: vagrant 
+  roles: 
+  - create-cluster
+  tags: master 
+
+- hosts: workers
+  become: yes
+  user: vagrant 
+  roles: 
+  - common_setup
+  - workers 
+  tags: workers 

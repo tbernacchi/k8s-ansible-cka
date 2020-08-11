@@ -1,0 +1,163 @@
+- name: "Start/enable docker and kubelet services"
+  service:
+    name: "{{ item }}"
+    enabled: yes
+    state: started
+  with_items:
+  - docker
+  - kubelet 
+
+- name: Check if /etc/docker/daemon.json exists
+  stat:
+    path: /etc/docker/daemon.json
+  register: daemon_json
+
+- name: Changing daemon of docker to systemd
+  template:
+    src: ../templates/daemon.json
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: '0755'
+  when: daemon_json.stat.exists == False
+  notify:
+  - daemon-reload
+  - restart docker
+
+- name: Check if the master it's already in Ready state
+  shell: kubectl get nodes | grep master| awk "{ print $2 }"
+  register: master_ready 
+
+- name: Reset Cluster
+  command: >
+    kubeadm reset --force
+  register: kubeadmin_init
+  when: master_ready is failed
+
+- name: Stat /etc/kubernetes/admin.conf
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: admin_conf    
+
+- name: Create /etc/default/kubelet
+  template:
+    src: ../templates/kubelet 
+    dest: /etc/default/kubelet
+    owner: root
+    group: root 
+    mode: '0755'
+  notify: 
+  - restart kubelet 
+
+- name: Pulling images 
+  shell: kubeadm config images pull
+
+- name: Initialize Kubernetes master with kubeadm init.
+  shell: >
+    kubeadm init --apiserver-advertise-address {{ ansible_eth1.ipv4.address }} 
+  register: kubeadmin_init
+  when: admin_conf.stat.exists == False
+
+- name: Ensure .kube directory exists.
+  file:
+    path: ~/.kube
+    state: directory
+
+- name: Stat /root/.kube/config
+  stat: 
+    path: /root/.kube/config
+  register: kubeconfig
+
+- name: Symlink the kubectl admin.conf to ~/.kube/conf.
+  file:
+    src: /etc/kubernetes/admin.conf
+    dest: ~/.kube/config
+    state: link
+  when: kubeconfig.stat.exists == False 
+
+- name: Create shell script /usr/local/bin/check_weave_k8s.sh
+  template:
+    src: ../templates/check_weave_k8s.sh
+    dest: /usr/local/bin/check_weave_k8s.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Running /usr/local/bin/check_weave_k8s.sh
+  command: sh /usr/local/bin/check_weave_k8s.sh
+
+- name: IP range for workers 
+  shell: kubectl describe svc kubernetes| grep -i 'IP:' | awk '{ print $2 }' | sed "s/\.1/\.0/g" 
+  register: K8S_RANGE_IP 
+
+- name: Getting kubeadm join command 
+  shell: kubeadm token create --print-join-command 2> /dev/null
+  register: K8S_JOIN 
+
+- name: Add k8s kubeadm join command to dummy host
+  add_host: 
+    name: "K8S_HOST"
+    join: "{{ K8S_JOIN.stdout }}"
+    range: "{{ K8S_RANGE_IP.stdout }}"
+
+- name: Create shell script make_workers_list.sh on master 
+  template:
+    src: ../templates/make_workers_list.sh
+    dest: /usr/local/bin/make_workers_list.sh 
+    owner: root
+    group: root
+    mode: '0755'
+  delegate_to: "{{ groups['teste'][0] }}"
+
+- name: Create shell script join_worker_node.sh on master 
+  template:
+    src: ../templates/join_worker_node.sh
+    dest: /usr/local/bin/join_worker_node.sh
+    owner: root
+    group: root
+    mode: '0755'
+  delegate_to: "{{ groups['teste'][0] }}"
+
+- name: Check if join_worker_node.sh exists
+  stat:
+    path: /usr/local/bin/join_worker_node.sh
+  register: join_worker_node
+  delegate_to: "{{ groups['teste'][0] }}"
+
+- name: Check if there is workers on cluster 
+  shell: kubectl get nodes -o wide | grep -v master | grep -i ready | awk "{ print $6 }"
+  register: workers 
+
+- name: Executing make_workers_list.sh
+  command: sh /usr/local/bin/make_workers_list.sh 
+  when: workers is not failed 
+
+- name: Fetch the file join_worker_node.sh from master
+  run_once: yes
+  fetch: src=/usr/local/bin/join_worker_node.sh dest=buffer/ flat=yes
+  delegate_to: "{{ groups['teste'][0] }}"
+
+- name: Copy the join_worker_node.sh from master to workers
+  copy: src=buffer/join_worker_node.sh dest=/usr/local/bin/join_worker_node.sh mode=0755
+  delegate_to: "{{ groups['workers'][0] }}"
+
+- name: Creates a cron file under /etc/cron.d for workers list
+  cron:
+    name: Generate workers list for join_worker_node.sh
+    weekday: "*"
+    minute: "*/1"
+    hour: "*"
+    user: root
+    job: "sh /usr/local/bin/make_workers_list.sh >/dev/null 2>&1"
+    cron_file: workers-list
+
+- name: Create shell script /usr/local/bin/etcdctl.sh
+  template:
+    src: ../templates/etcdctl.sh
+    dest: /usr/local/bin/etcdctl.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Running /usr/local/bin/etcdctl.sh
+  command: sh /usr/local/bin/etcdctl.sh

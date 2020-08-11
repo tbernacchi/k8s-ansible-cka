@@ -1,0 +1,49 @@
+- name: Create /etc/default/kubelet
+  template:
+    src: ../templates/kubelet
+    dest: /etc/default/kubelet
+    owner: root
+    group: root
+    mode: '0755'
+  notify:
+  - daemon-reload
+  - restart kubelet
+
+- name: Check if there is a route for k8s master
+  shell: ip route show | grep "10.96"
+  register: route
+  ignore_errors: true
+  no_log: true 
+  
+- name: Setting route on worker nodes to master
+  shell: >
+    ip route add {{ hostvars['K8S_HOST']['range'] }}/12 dev {{ ansible_eth1.device }}
+  ignore_errors: true
+  no_log: true
+  #when: route is failed 
+
+- name: Add a static route on /etc/network/interfaces 
+  blockinfile:
+    path: /etc/network/interfaces 
+    block: | 
+      #Add by Ansible workers playbook
+      up route add -net  {{ hostvars['K8S_HOST']['range'] }}/12 gw {{ ansible_eth1.ipv4.address }} dev {{ ansible_eth1.device }}
+    create: no 
+  ignore_errors: true
+  no_log: true 
+  #when: route is failed 
+
+- name: Joing worker to the cluster - join_worker_node.sh
+  command: sh /usr/local/bin/join_worker_node.sh
+  ignore_errors: true
+  no_log: true
+  register: script 
+
+- name: Output error
+  debug:
+    msg:
+    - "FAILED! => FAILED! message above means the node it's already in to the cluster!"
+  when: script is failed
+
+#- name: Reboot worker nodes 
+#  reboot:

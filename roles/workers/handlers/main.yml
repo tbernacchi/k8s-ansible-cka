@@ -1,0 +1,7 @@
+---
+# handlers file for workers
+- name: daemon-reload
+  command: systemctl daemon-reload
+
+- name: restart kubelet
+  service: name=kubelet state=restarted
